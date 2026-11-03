@@ -72,7 +72,7 @@ func segmentCrossesTile(a orb.Point, b orb.Point, x uint32, y uint32) bool {
 	return t0 < t1
 }
 
-// bitmapMultiPolygonIntersecting returns the tiles at zoom whose interior intersects multipolygon, excluding tiles that only touch its boundary.
+// bitmapMultiPolygonIntersecting returns the tiles at zoom that overlap multipolygon, excluding tiles that only touch its boundary.
 func bitmapMultiPolygonIntersecting(zoom uint8, multipolygon orb.MultiPolygon) *roaring64.Bitmap {
 	boundarySet, interiorSet := bitmapMultiPolygon(zoom, multipolygon)
 	relevantSet := roaring64.New()
@@ -104,7 +104,7 @@ func bitmapMultiPolygonIntersecting(zoom uint8, multipolygon orb.MultiPolygon) *
 	return relevantSet
 }
 
-// bitmapMultiPolygonZooms returns the tiles whose interior intersects multipolygon, computed separately at each zoom from minzoom to maxzoom, inclusive.
+// bitmapMultiPolygonZooms returns the tiles that overlap multipolygon, computed separately at each zoom from minzoom to maxzoom, inclusive.
 func bitmapMultiPolygonZooms(minzoom uint8, maxzoom uint8, multipolygon orb.MultiPolygon) *roaring64.Bitmap {
 	relevantSet := roaring64.New()
 	for z := int(minzoom); z <= int(maxzoom); z++ {

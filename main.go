@@ -509,6 +509,11 @@ func parseZoomParam(query url.Values, key string) (int8, error) {
 
 func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName string, defaultOverfetch float32) (extractParams, error) {
 	query := r.URL.Query()
+	for _, key := range []string{"slice", "polygon", "bbox"} {
+		if len(query[key]) > 1 {
+			return extractParams{}, fmt.Errorf("%s can be specified at most once", key)
+		}
+	}
 	params := extractParams{
 		bbox:      query.Get("bbox"),
 		tile:      query.Get("tile"),
@@ -548,8 +553,11 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 			return params, fmt.Errorf("Invalid slice")
 		}
 	}
-	if (params.bbox != "" && (params.tile != "" || len(params.polygon) > 0)) || (params.tile != "" && len(params.polygon) > 0) {
-		return params, fmt.Errorf("Only one of bbox, tile, and polygon can be specified")
+	if (slice && (len(params.polygon) > 0 || params.bbox != "")) || (len(params.polygon) > 0 && params.bbox != "") {
+		return params, fmt.Errorf("Only one of slice, polygon, and bbox can be specified")
+	}
+	if params.tile != "" && (len(params.polygon) > 0 || params.bbox != "") {
+		return params, fmt.Errorf("Only one of tile, polygon, and bbox can be specified")
 	}
 	if params.bbox != "" {
 		if len(strings.Split(params.bbox, ",")) != 4 {
