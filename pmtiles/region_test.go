@@ -107,3 +107,51 @@ func TestEmptyFeatureCollectionRegion(t *testing.T) {
 	}`))
 	assert.NotNil(t, err)
 }
+
+func TestUnmarshalPoly(t *testing.T) {
+	result, err := UnmarshalPoly([]byte(`test
+1
+  0 0
+  0 10
+  10 10
+  10 0
+END
+!2
+  2 2
+  2 4
+  4 4
+  4 2
+  2 2
+END
+3
+  20 20
+  20 21
+  21 21
+END
+END
+`))
+	assert.Nil(t, err)
+	assert.Equal(t, orb.MultiPolygon{
+		{{{0, 0}, {0, 10}, {10, 10}, {10, 0}, {0, 0}}, {{2, 2}, {2, 4}, {4, 4}, {4, 2}, {2, 2}}},
+		{{{20, 20}, {20, 21}, {21, 21}, {20, 20}}},
+	}, result)
+}
+
+func TestUnmarshalPolyInvalid(t *testing.T) {
+	_, err := UnmarshalPoly([]byte("test\n1\n 0 0\n 0 1\n 1 1\nEND\n"))
+	assert.NotNil(t, err)
+	_, err = UnmarshalPoly([]byte("test\n1\n 0 0\n 0 1\nEND\nEND\n"))
+	assert.NotNil(t, err)
+	_, err = UnmarshalPoly([]byte("test\n1\n 0 x\n 0 1\n 1 1\nEND\nEND\n"))
+	assert.NotNil(t, err)
+}
+
+func TestUnmarshalPolygonDetectsFormat(t *testing.T) {
+	expected := orb.MultiPolygon{{{{0, 0}, {0, 1}, {1, 1}, {0, 0}}}}
+	result, err := UnmarshalPolygon([]byte(` {"type": "Polygon", "coordinates": [[[0, 0],[0,1],[1,1],[0,0]]]}`))
+	assert.Nil(t, err)
+	assert.Equal(t, expected, result)
+	result, err = UnmarshalPolygon([]byte("test\r\n1\r\n 0 0\r\n 0 1\r\n 1 1\r\nEND\r\nEND\r\n"))
+	assert.Nil(t, err)
+	assert.Equal(t, expected, result)
+}
