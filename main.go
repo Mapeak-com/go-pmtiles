@@ -525,16 +525,17 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 		overfetch: defaultOverfetch,
 	}
 	if r.Method == http.MethodPost {
+		if query.Has("polygon") {
+			return params, fmt.Errorf("POST takes the polygon as the request body, not as a parameter")
+		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPolygonBytes))
 		if err != nil {
 			return params, fmt.Errorf("Failed to read polygon: %v", err)
 		}
-		if len(body) > 0 {
-			if len(params.polygon) > 0 {
-				return params, fmt.Errorf("Only one of polygon parameter and request body can be specified")
-			}
-			params.polygon = body
+		if len(body) == 0 {
+			return params, fmt.Errorf("POST requires the polygon as the request body")
 		}
+		params.polygon = body
 	}
 	var err error
 	if params.minZoom, err = parseZoomParam(query, "minzoom"); err != nil {

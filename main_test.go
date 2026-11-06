@@ -286,8 +286,6 @@ func TestServeExtractPolygonBody(t *testing.T) {
 		tiles := assertExtract(t, serve(handler, http.MethodPost, "/world?output=area.pmtiles", []byte(polygon)), "area.pmtiles")
 		assert.ElementsMatch(t, []zxy{{0, 0, 0}, {1, 1, 0}, {2, 2, 1}, {3, 4, 3}}, tiles)
 	}
-	tiles := assertExtract(t, serve(handler, http.MethodPost, "/world?maxzoom=1", nil), "world.pmtiles")
-	assert.Equal(t, map[uint8]int{0: 1, 1: 4}, zoomCounts(tiles))
 }
 
 func TestServeExtractParamErrors(t *testing.T) {
@@ -320,6 +318,8 @@ func TestServeExtractParamErrors(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodGet, target, nil).Code, target)
 	}
 	assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodPost, "/world?polygon="+polygon, []byte(geojsonPolygon)).Code)
+	assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodPost, "/world?polygon="+polygon, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodPost, "/world?maxzoom=1", nil).Code)
 	assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodPost, "/world", []byte("notapolygon")).Code)
 	assert.Equal(t, http.StatusBadRequest, serve(handler, http.MethodPost, "/world?bbox=0,0,1,1", []byte(geojsonPolygon)).Code)
 }
