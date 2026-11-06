@@ -43,7 +43,7 @@ A polygon is an Osmosis .poly file or a GeoJSON Polygon or MultiPolygon, and the
 
 Other query parameters, accepted by both `GET` and `POST`:
 
-* `output` sets the name of the returned file (default `<name>.pmtiles`)
+* `output`: the returned file name (default `{name}.pmtiles`, or `{name}+{z}-{x}-{y}.pmtiles` with `slice`)
 * `bbox=min_lon,min_lat,max_lon,max_lat` uses the tile selection of `pmtiles extract --bbox`
 * `slice=z/x/y` selects the area of tile `z/x/y`
   * Sets `minzoom` to `z` unless `minzoom` is given
