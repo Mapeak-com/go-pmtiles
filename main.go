@@ -375,6 +375,9 @@ func startHTTPServer(addr string, handler http.Handler) error {
 func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit int8, downloadThreads int, overfetch float32) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		if bucket != "" || strings.HasPrefix(source, "http") {
+			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second))
+		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		w = rec
 		defer func() {
