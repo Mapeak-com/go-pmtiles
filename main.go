@@ -519,7 +519,7 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 	}
 	params := extractParams{
 		bbox:      query.Get("bbox"),
-		tile:      query.Get("tile"),
+		tile:      query.Get("slice"),
 		polygon:   []byte(query.Get("polygon")),
 		output:    query.Get("output"),
 		overfetch: defaultOverfetch,
@@ -550,17 +550,8 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 		}
 		params.overfetch = float32(parsed)
 	}
-	slice := query.Has("slice")
-	if value := query.Get("slice"); value != "" {
-		if slice, err = strconv.ParseBool(value); err != nil {
-			return params, fmt.Errorf("Invalid slice")
-		}
-	}
-	if (slice && (len(params.polygon) > 0 || params.bbox != "")) || (len(params.polygon) > 0 && params.bbox != "") {
+	if (params.tile != "" && (len(params.polygon) > 0 || params.bbox != "")) || (len(params.polygon) > 0 && params.bbox != "") {
 		return params, fmt.Errorf("Only one of slice, polygon, and bbox can be specified")
-	}
-	if params.tile != "" && (len(params.polygon) > 0 || params.bbox != "") {
-		return params, fmt.Errorf("Only one of tile, polygon, and bbox can be specified")
 	}
 	if params.bbox != "" {
 		if len(strings.Split(params.bbox, ",")) != 4 {
@@ -575,33 +566,28 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 			return params, fmt.Errorf("Invalid polygon: %v", err)
 		}
 	}
-	var z, x, y int64
-	if params.tile != "" {
-		parts := strings.Split(params.tile, ",")
+	if query.Has("slice") {
+		parts := strings.Split(params.tile, "/")
 		if len(parts) != 3 {
-			return params, fmt.Errorf("Invalid tile")
+			return params, fmt.Errorf("Invalid slice")
 		}
-		z, err = strconv.ParseInt(parts[0], 10, 8)
+		z, err := strconv.ParseInt(parts[0], 10, 8)
 		if err != nil || z < 0 || z > 24 {
-			return params, fmt.Errorf("Invalid tile zoom level")
+			return params, fmt.Errorf("Invalid slice zoom level")
 		}
-		x, err = strconv.ParseInt(parts[1], 10, 64)
+		x, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			return params, fmt.Errorf("Invalid tile")
+			return params, fmt.Errorf("Invalid slice")
 		}
-		y, err = strconv.ParseInt(parts[2], 10, 64)
+		y, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
-			return params, fmt.Errorf("Invalid tile")
+			return params, fmt.Errorf("Invalid slice")
 		}
 		limit := int64(1 << z)
 		if x < 0 || x >= limit || y < 0 || y >= limit {
 			return params, fmt.Errorf("Coordinates out of bounds for given zoom level")
 		}
-	}
-	if slice {
-		if params.tile == "" {
-			return params, fmt.Errorf("slice requires tile")
-		}
+		params.tile = fmt.Sprintf("%d,%d,%d", z, x, y)
 		if params.minZoom < 0 {
 			params.minZoom = int8(z)
 		}

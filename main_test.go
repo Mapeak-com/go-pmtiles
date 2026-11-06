@@ -241,27 +241,18 @@ func TestServeExtractBboxParam(t *testing.T) {
 	assert.ElementsMatch(t, []zxy{{0, 0, 0}, {1, 1, 0}, {2, 2, 1}, {3, 4, 3}}, tiles)
 }
 
-func TestServeExtractTileParam(t *testing.T) {
-	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
-	tiles := assertExtract(t, serve(handler, http.MethodGet, "/world?tile=1,1,0", nil), "world.pmtiles")
-	assert.Equal(t, map[uint8]int{0: 1, 1: 1, 2: 4, 3: 16}, zoomCounts(tiles))
-	assert.Contains(t, tiles, zxy{1, 1, 0})
-	assert.NotContains(t, tiles, zxy{1, 0, 0})
-}
-
 func TestServeExtractSliceParam(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	for target, fileName := range map[string]string{
-		"/world?tile=1,1,0&slice":                              "world+1-1-0.pmtiles",
-		"/world?tile=1,1,0&slice=true":                         "world+1-1-0.pmtiles",
-		"/world?tile=1,1,0&slice&output=w-{z}-{x}-{y}.pmtiles": "w-1-1-0.pmtiles",
+		"/world?slice=1/1/0":                              "world+1-1-0.pmtiles",
+		"/world?slice=1/1/0&output=w-{z}-{x}-{y}.pmtiles": "w-1-1-0.pmtiles",
 	} {
 		tiles := assertExtract(t, serve(handler, http.MethodGet, target, nil), fileName)
 		assert.Equal(t, map[uint8]int{1: 1, 2: 4, 3: 16}, zoomCounts(tiles), target)
+		assert.Contains(t, tiles, zxy{1, 1, 0})
+		assert.NotContains(t, tiles, zxy{1, 0, 0})
 	}
-	tiles := assertExtract(t, serve(handler, http.MethodGet, "/world?tile=1,1,0&slice&minzoom=0", nil), "world+1-1-0.pmtiles")
-	assert.Equal(t, map[uint8]int{0: 1, 1: 1, 2: 4, 3: 16}, zoomCounts(tiles))
-	tiles = assertExtract(t, serve(handler, http.MethodGet, "/world?tile=1,1,0&slice=false", nil), "world.pmtiles")
+	tiles := assertExtract(t, serve(handler, http.MethodGet, "/world?slice=1/1/0&minzoom=0", nil), "world+1-1-0.pmtiles")
 	assert.Equal(t, map[uint8]int{0: 1, 1: 1, 2: 4, 3: 16}, zoomCounts(tiles))
 }
 
@@ -303,25 +294,23 @@ func TestServeExtractParamErrors(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	polygon := url.QueryEscape(geojsonPolygon)
 	for _, target := range []string{
-		"/world?slice&slice&tile=1,0,0",
+		"/world?slice=1/0/0&slice=1/0/0",
 		"/world?bbox=0,0,1,1&bbox=0,0,1,1",
 		"/world?polygon=" + polygon + "&polygon=" + polygon,
 		"/world?bbox=0,0,1,1&polygon=" + polygon,
-		"/world?slice&tile=1,0,0&bbox=0,0,1,1",
-		"/world?slice&tile=1,0,0&polygon=" + polygon,
-		"/world?tile=1,0,0&bbox=0,0,1,1",
-		"/world?tile=1,0,0&polygon=" + polygon,
+		"/world?slice=1/0/0&bbox=0,0,1,1",
+		"/world?slice=1/0/0&polygon=" + polygon,
 		"/world?slice",
-		"/world?slice=maybe&tile=1,0,0",
 		"/world?bbox=0,0,1",
 		"/world?bbox=a,0,1,1",
 		"/world?polygon=notapolygon",
-		"/world?tile=1,0",
-		"/world?tile=25,0,0",
-		"/world?tile=1,a,0",
-		"/world?tile=1,0,a",
-		"/world?tile=1,2,0",
-		"/world?tile=1,0,2",
+		"/world?slice=1/0",
+		"/world?slice=1,0,0",
+		"/world?slice=25/0/0",
+		"/world?slice=1/a/0",
+		"/world?slice=1/0/a",
+		"/world?slice=1/2/0",
+		"/world?slice=1/0/2",
 		"/world?minzoom=25",
 		"/world?maxzoom=a",
 		"/world?overfetch=-1",

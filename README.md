@@ -36,8 +36,7 @@ Endpoints:
 * `GET /<name>` or `GET /<name>.pmtiles` (also `HEAD`) with query parameters:
   * `bbox=min_lon,min_lat,max_lon,max_lat`: the same tile selection as `pmtiles extract --bbox`
   * `polygon=`: an Osmosis .poly or GeoJSON Polygon/MultiPolygon; at each zoom, the tiles that overlap the polygon, matching Planetiler `--polygon`
-  * `tile=z,x,y`: the area of tile `z/x/y`, from `minzoom` (default 0) up
-  * `slice`: with `tile`, sets `minzoom` to the tile zoom unless given, and fills `{z}`, `{x}`, `{y}` in `output`
+  * `slice=z/x/y`: the area of tile `z/x/y`, from `minzoom` (default `z`) up; fills `{z}`, `{x}`, `{y}` in `output`
   * `minzoom`, `maxzoom`, `overfetch`
   * `output`: the returned file name (default `<name>.pmtiles`, or `<name>+<z>-<x>-<y>.pmtiles` with `slice`)
 * `POST /<name>` takes the same parameters, with the polygon as the request body (up to 64 MiB)
