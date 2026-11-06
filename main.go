@@ -593,13 +593,14 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 			params.minZoom = int8(z)
 		}
 		if params.output == "" {
-			params.output = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
+			params.output = "{name}+{z}-{x}-{y}.pmtiles"
 		}
 		params.output = strings.NewReplacer("{z}", strconv.FormatInt(z, 10), "{x}", strconv.FormatInt(x, 10), "{y}", strconv.FormatInt(y, 10)).Replace(params.output)
 	}
 	if params.output == "" {
-		params.output = archiveName + ".pmtiles"
+		params.output = "{name}.pmtiles"
 	}
+	params.output = strings.ReplaceAll(params.output, "{name}", archiveName)
 	return params, nil
 }
 
