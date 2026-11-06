@@ -33,19 +33,27 @@ Endpoints:
 
 * `GET /<name>-<z>.pmtiles`: zoom levels 0 to `z`
 * `GET /<name>+<z>-<x>-<y>.pmtiles`: the area of tile `z/x/y`, from zoom `z` up
-* `GET /<name>` or `GET /<name>.pmtiles` (also `HEAD`) with query parameters:
-  * `bbox=min_lon,min_lat,max_lon,max_lat`: the same tile selection as `pmtiles extract --bbox`
-  * `polygon=`: an Osmosis .poly or GeoJSON Polygon/MultiPolygon; at each zoom, the tiles that overlap the polygon, matching Planetiler `--polygon`
-  * `slice=z/x/y`: the area of tile `z/x/y`, from `minzoom` (default `z`) up; fills `{z}`, `{x}`, `{y}` in `output`
-  * `minzoom`, `maxzoom`, `overfetch`
-  * `output`: the returned file name (default `<name>.pmtiles`, or `<name>+<z>-<x>-<y>.pmtiles` with `slice`)
-* `POST /<name>` takes the same query parameters except `polygon`, and requires the raw polygon file (GeoJSON or Osmosis .poly, up to 64 MiB) as the request body
+* `GET /<name>` and `POST /<name>` (also `HEAD`), both with an optional `.pmtiles` suffix: the selection given by the query parameters below
+
+Polygon extracts select, at each zoom level, the tiles that overlap the polygon, excluding tiles that only touch it. This matches Planetiler `--polygon`.
+
+A polygon is an Osmosis .poly file or a GeoJSON Polygon or MultiPolygon, and the format is detected automatically.
+
+`GET` takes the polygon as the `polygon` query parameter. `POST` requires the polygon as the raw request body (up to 64 MiB) and rejects a `polygon` query parameter. `pmtiles extract` takes a polygon file with `--polygon`.
+
+Other query parameters, accepted by both `GET` and `POST`:
+
+* `output` sets the name of the returned file (default `<name>.pmtiles`)
+* `bbox=min_lon,min_lat,max_lon,max_lat` uses the tile selection of `pmtiles extract --bbox`
+* `slice=z/x/y` selects the area of tile `z/x/y`
+  * Sets `minzoom` to `z` unless `minzoom` is given
+  * Sets `output` to `<name>+{z}-{x}-{y}.pmtiles` unless `output` is given
+  * Fills `{z}`, `{x}`, `{y}` in `output`
+* `minzoom`, `maxzoom` and `overfetch`
 
 `slice`, `polygon` and `bbox` are mutually exclusive, and each can appear at most once.
 
 Responses are sent with `Content-Disposition: attachment` and the output file name. An extraction is cancelled when the client disconnects. Responses from remote sources can take up to 120 seconds to write; responses from local sources up to 10 seconds.
-
-`pmtiles extract --polygon <file>` selects tiles the same way as the `polygon` parameter.
 
 ## Development
 
