@@ -220,7 +220,7 @@ func replacingSource(t *testing.T, v1, v2 []byte, sec section) (*httptest.Server
 func extractReplaced(t *testing.T, v1, v2 []byte, sec section) {
 	server, replaced := replacingSource(t, v1, v2, sec)
 	output := filepath.Join(t.TempDir(), "output.pmtiles")
-	err := Extract(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, "", "", "", output, 1, 0.05, false)
+	err := Extract(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, "", nil, "", "", output, 1, 0.05, false)
 	assert.True(t, *replaced)
 	assert.True(t, isRefreshRequiredError(err), "expected RefreshRequiredError, got %v", err)
 }

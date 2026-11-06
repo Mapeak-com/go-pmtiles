@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,6 +37,7 @@ var (
 
 	maxZoomRegex = regexp.MustCompile(`^/([^/]+)-(\d+)\.pmtiles$`)
 	minZoomRegex = regexp.MustCompile(`^/([^/]+)\+(\d+)-(\d+)-(\d+)\.pmtiles$`)
+	sourceRegex  = regexp.MustCompile(`^/([^/]+?)(?:\.pmtiles)?$`)
 )
 
 var cli struct {
@@ -74,6 +76,7 @@ var cli struct {
 		Output          string  `arg:"" help:"Output archive" type:"path"`
 		Bucket          string  `help:"Remote bucket of input archive"`
 		Region          string  `help:"local GeoJSON Polygon or MultiPolygon file for area of interest" type:"existingfile"`
+		Polygon         string  `help:"local Osmosis .poly or GeoJSON Polygon or MultiPolygon file; extracts the tiles intersecting it at each zoom level" type:"existingfile"`
 		Bbox            string  `help:"bbox area of interest: min_lon,min_lat,max_lon,max_lat" type:"string"`
 		Tile            string  `help:"Tile ID of the area of interest: Zoom,X,Y" type:"string"`
 		Slice           bool    `help:"Slice output files at --minzooom. --output is a template with {x},{y} and optional {z}"`
@@ -125,7 +128,7 @@ var cli struct {
 
 	ServeExtract struct {
 		Source          string  `arg:"" help:"Directory or bucket prefix containing source PMTiles archives, or a single local or remote .pmtiles archive"`
-		Name            string  `help:"Name to serve instead of the source file name; requires a single .pmtiles source"`
+		Name            string  `help:"Name to serve a single .pmtiles source under; defaults to its file name without .pmtiles; rejected for a directory or bucket prefix source"`
 		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
 		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
 		Interface       string  `default:"0.0.0.0"`
@@ -236,8 +239,8 @@ func main() {
 		}
 	case "extract <input> <output>":
 		if cli.Extract.Slice {
-			if cli.Extract.Region != "" || cli.Extract.Bbox != "" || cli.Extract.Tile != "" {
-				logger.Fatalf("Only one of slice, region, bbox, and tile can be specified")
+			if cli.Extract.Region != "" || cli.Extract.Polygon != "" || cli.Extract.Bbox != "" || cli.Extract.Tile != "" {
+				logger.Fatalf("Only one of slice, region, polygon, bbox, and tile can be specified")
 			}
 			numtiles := int(math.Pow(2, float64(cli.Extract.Minzoom)))
 			bar := progressbar.NewOptions64(
@@ -259,7 +262,7 @@ func main() {
 						logger.Fatalf("Error creating directory '%s': %v\n", dir, err)
 					}
 					tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
-					err = pmtiles.Extract(context.Background(), log.New(io.Discard, "", 0), cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+					err = pmtiles.Extract(context.Background(), log.New(io.Discard, "", 0), cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", nil, "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 					bar.Add(1)
 					if err != nil {
 						logger.Fatalf("Failed to extract, %v", err)
@@ -268,7 +271,15 @@ func main() {
 			}
 			fmt.Println()
 		} else {
-			err := pmtiles.Extract(context.Background(), logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+			var polygon []byte
+			if cli.Extract.Polygon != "" {
+				var err error
+				polygon, err = os.ReadFile(cli.Extract.Polygon)
+				if err != nil {
+					logger.Fatalf("Failed to read polygon, %v", err)
+				}
+			}
+			err := pmtiles.Extract(context.Background(), logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, polygon, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 			if err != nil {
 				logger.Fatalf("Failed to extract, %v", err)
 			}
@@ -364,6 +375,9 @@ func startHTTPServer(addr string, handler http.Handler) error {
 func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit int8, downloadThreads int, overfetch float32) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		if bucket != "" || strings.HasPrefix(source, "http") {
+			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second))
+		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		w = rec
 		defer func() {
@@ -373,6 +387,9 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 		var minZoom, maxZoom int8
 		var tileStr string
 		var fileName string
+		var bbox string
+		var polygon []byte
+		requestOverfetch := overfetch
 
 		if m := minZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
 			archiveName = filepath.Base(m[1])
@@ -420,6 +437,26 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 			tileStr = ""
 			fileName = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
 
+		} else if m := sourceRegex.FindStringSubmatch(r.URL.Path); m != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
+			archiveName = filepath.Base(m[1])
+			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
+				http.Error(w, "Invalid archive name", http.StatusBadRequest)
+				return
+			}
+
+			params, err := parseExtractParams(w, r, archiveName, overfetch)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			minZoom = params.minZoom
+			maxZoom = params.maxZoom
+			tileStr = params.tile
+			bbox = params.bbox
+			polygon = params.polygon
+			fileName = params.output
+			requestOverfetch = params.overfetch
+
 		} else {
 			http.NotFound(w, r)
 			return
@@ -428,10 +465,10 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 		if minZoomLimit >= 0 && minZoom < minZoomLimit {
 			minZoom = minZoomLimit
 		}
-		if maxZoomLimit >= 0 && maxZoom > maxZoomLimit {
+		if maxZoomLimit >= 0 && (maxZoom < 0 || maxZoom > maxZoomLimit) {
 			maxZoom = maxZoomLimit
 		}
-		if minZoom > maxZoom {
+		if maxZoom >= 0 && minZoom > maxZoom {
 			http.Error(w, "Zoom level above the maximum zoom level", http.StatusBadRequest)
 			return
 		}
@@ -445,8 +482,126 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 			sourceFile = source
 		}
 
-		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, tileStr, downloadThreads, overfetch)
+		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, polygon, bbox, tileStr, downloadThreads, requestOverfetch)
 	}
+}
+
+const maxPolygonBytes = 64 << 20
+
+type extractParams struct {
+	minZoom   int8
+	maxZoom   int8
+	bbox      string
+	tile      string
+	polygon   []byte
+	output    string
+	overfetch float32
+}
+
+func parseZoomParam(query url.Values, key string) (int8, error) {
+	value := query.Get(key)
+	if value == "" {
+		return -1, nil
+	}
+	z, err := strconv.ParseInt(value, 10, 8)
+	if err != nil || z < -1 || z > 24 {
+		return 0, fmt.Errorf("Invalid %s", key)
+	}
+	return int8(z), nil
+}
+
+func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName string, defaultOverfetch float32) (extractParams, error) {
+	query := r.URL.Query()
+	for _, key := range []string{"slice", "polygon", "bbox"} {
+		if len(query[key]) > 1 {
+			return extractParams{}, fmt.Errorf("%s can be specified at most once", key)
+		}
+	}
+	params := extractParams{
+		bbox:      query.Get("bbox"),
+		tile:      query.Get("slice"),
+		polygon:   []byte(query.Get("polygon")),
+		output:    query.Get("output"),
+		overfetch: defaultOverfetch,
+	}
+	if r.Method == http.MethodPost {
+		if query.Has("polygon") {
+			return params, fmt.Errorf("POST takes the polygon as the request body, not as a parameter")
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPolygonBytes))
+		if err != nil {
+			return params, fmt.Errorf("Failed to read polygon: %v", err)
+		}
+		if len(body) == 0 {
+			return params, fmt.Errorf("POST requires the polygon as the request body")
+		}
+		params.polygon = body
+	}
+	var err error
+	if params.minZoom, err = parseZoomParam(query, "minzoom"); err != nil {
+		return params, err
+	}
+	if params.maxZoom, err = parseZoomParam(query, "maxzoom"); err != nil {
+		return params, err
+	}
+	if value := query.Get("overfetch"); value != "" {
+		parsed, err := strconv.ParseFloat(value, 32)
+		if err != nil || parsed < 0 {
+			return params, fmt.Errorf("Invalid overfetch")
+		}
+		params.overfetch = float32(parsed)
+	}
+	if (params.tile != "" && (len(params.polygon) > 0 || params.bbox != "")) || (len(params.polygon) > 0 && params.bbox != "") {
+		return params, fmt.Errorf("Only one of slice, polygon, and bbox can be specified")
+	}
+	if params.bbox != "" {
+		if len(strings.Split(params.bbox, ",")) != 4 {
+			return params, fmt.Errorf("Invalid bbox")
+		}
+		if _, err := pmtiles.BboxRegion(params.bbox); err != nil {
+			return params, fmt.Errorf("Invalid bbox")
+		}
+	}
+	if len(params.polygon) > 0 {
+		if _, err := pmtiles.UnmarshalPolygon(params.polygon); err != nil {
+			return params, fmt.Errorf("Invalid polygon: %v", err)
+		}
+	}
+	if query.Has("slice") {
+		parts := strings.Split(params.tile, "/")
+		if len(parts) != 3 {
+			return params, fmt.Errorf("Invalid slice")
+		}
+		z, err := strconv.ParseInt(parts[0], 10, 8)
+		if err != nil || z < 0 || z > 24 {
+			return params, fmt.Errorf("Invalid slice zoom level")
+		}
+		x, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return params, fmt.Errorf("Invalid slice")
+		}
+		y, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return params, fmt.Errorf("Invalid slice")
+		}
+		limit := int64(1 << z)
+		if x < 0 || x >= limit || y < 0 || y >= limit {
+			return params, fmt.Errorf("Coordinates out of bounds for given zoom level")
+		}
+		params.tile = fmt.Sprintf("%d,%d,%d", z, x, y)
+		if params.minZoom < 0 {
+			params.minZoom = int8(z)
+		}
+		if params.output == "" {
+			params.output = "{name}+{z}-{x}-{y}.pmtiles"
+		}
+		params.output = strings.NewReplacer("{z}", strconv.FormatInt(z, 10), "{x}", strconv.FormatInt(x, 10), "{y}", strconv.FormatInt(y, 10)).Replace(params.output)
+	}
+	if params.output == "" {
+		params.output = "{name}.pmtiles"
+	}
+	params.output = strings.ReplaceAll(params.output, "{name}", archiveName)
+	return params, nil
 }
 
 func readHeader(bucketURL, sourceFile string) error {
@@ -468,7 +623,7 @@ func readHeader(bucketURL, sourceFile string) error {
 	return err
 }
 
-func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, tileStr string, downloadThreads int, overfetch float32) {
+func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, polygon []byte, bbox, tileStr string, downloadThreads int, overfetch float32) {
 	if err := readHeader(bucket, sourceFile); err != nil {
 		log.Printf("Error serving extract for %s: %v", fileName, err)
 		http.Error(w, "Archive not found", http.StatusNotFound)
@@ -488,14 +643,15 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, 
 
 	for attempt := 1; ; attempt++ {
 		err = pmtiles.Extract(
-			context.Background(),
+			r.Context(),
 			log.New(io.Discard, "", 0),
 			bucket,
 			sourceFile,
 			minZoom,
 			maxZoom,
 			"",
-			"",
+			polygon,
+			bbox,
 			tileStr,
 			tempName,
 			downloadThreads,
@@ -526,6 +682,7 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, 
 		return
 	}
 	defer f.Close()
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
 	http.ServeContent(w, r, fileName, time.Now(), f)
 }
 

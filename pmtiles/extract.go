@@ -260,7 +260,7 @@ func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
 // 9. get and write the metadata.
 // 10. write the leaf directories (if any)
 // 11. Get all tiles, and write directly to the output.
-func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
+func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, polygon []byte, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
 	// 1. fetch the header
 	start := time.Now()
 
@@ -319,8 +319,8 @@ func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key stri
 	}
 
 	if tileStr != "" {
-		if regionFile != "" || bbox != "" {
-			return fmt.Errorf("Only one of region, bbox, and tile can be specified")
+		if regionFile != "" || len(polygon) > 0 || bbox != "" {
+			return fmt.Errorf("Only one of region, polygon, bbox, and tile can be specified")
 		}
 		parts := strings.Split(tileStr, ",")
 		if len(parts) != 3 {
@@ -342,9 +342,9 @@ func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key stri
 	}
 
 	var relevantSet *roaring64.Bitmap
-	if regionFile != "" || bbox != "" {
-		if regionFile != "" && bbox != "" {
-			return fmt.Errorf("only one of region and bbox can be specified")
+	if regionFile != "" || len(polygon) > 0 || bbox != "" {
+		if (regionFile != "" && (len(polygon) > 0 || bbox != "")) || (len(polygon) > 0 && bbox != "") {
+			return fmt.Errorf("only one of region, polygon, and bbox can be specified")
 		}
 
 		var multipolygon orb.MultiPolygon
@@ -353,6 +353,15 @@ func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key stri
 		if regionFile != "" {
 			dat, _ := ioutil.ReadFile(regionFile)
 			multipolygon, err = UnmarshalRegion(dat)
+			if err != nil {
+				return err
+			}
+
+			bound := multipolygon.Bound()
+			centerLon = bound.Center().X()
+			centerLat = bound.Center().Y()
+		} else if len(polygon) > 0 {
+			multipolygon, err = UnmarshalPolygon(polygon)
 			if err != nil {
 				return err
 			}
@@ -400,10 +409,14 @@ func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key stri
 		header.CenterLatE7 = int32(centerLat * 10000000)
 
 		// 2. construct a relevance bitmap
-		boundarySet, interiorSet := bitmapMultiPolygon(uint8(maxzoom), multipolygon)
-		relevantSet = boundarySet
-		relevantSet.Or(interiorSet)
-		generalizeOr(relevantSet, uint8(minzoom))
+		if len(polygon) > 0 {
+			relevantSet = bitmapMultiPolygonZooms(uint8(minzoom), uint8(maxzoom), multipolygon)
+		} else {
+			boundarySet, interiorSet := bitmapMultiPolygon(uint8(maxzoom), multipolygon)
+			relevantSet = boundarySet
+			relevantSet.Or(interiorSet)
+			generalizeOr(relevantSet, uint8(minzoom))
+		}
 	} else {
 		relevantSet = roaring64.New()
 		relevantSet.AddRange(ZxyToID(uint8(minzoom), 0, 0), ZxyToID(uint8(maxzoom)+1, 0, 0))

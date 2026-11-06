@@ -1,9 +1,11 @@
 package pmtiles
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
+	"github.com/paulmach/orb/planar"
 	"strconv"
 	"strings"
 )
@@ -84,4 +86,80 @@ func UnmarshalRegion(data []byte) (orb.MultiPolygon, error) {
 	}
 
 	return nil, fmt.Errorf("No geometry")
+}
+
+// UnmarshalPoly parses an Osmosis polygon filter file into an orb.MultiPolygon region.
+// A ring whose header starts with '!' is a hole in each preceding ring that contains it.
+func UnmarshalPoly(data []byte) (orb.MultiPolygon, error) {
+	var result orb.MultiPolygon
+	var ring orb.Ring
+	firstLine := true
+	inRing := false
+	inPolygon := true
+	hole := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case !inPolygon:
+			return nil, fmt.Errorf("poly file continues after end of polygon")
+		case firstLine:
+			firstLine = false
+		case inRing && line == "END":
+			if len(ring) > 0 && !ring.Closed() {
+				ring = append(ring, ring[0])
+			}
+			if len(ring) < 4 {
+				return nil, fmt.Errorf("poly ring has fewer than 3 distinct points")
+			}
+			if hole {
+				for i := range result {
+					if planar.RingContains(result[i][0], ring[0]) {
+						result[i] = append(result[i], ring)
+					}
+				}
+			} else {
+				result = append(result, orb.Polygon{ring})
+			}
+			ring = nil
+			inRing = false
+		case inRing:
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return nil, fmt.Errorf("invalid poly coordinate: %s", line)
+			}
+			lon, err := strconv.ParseFloat(fields[0], 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid poly coordinate: %w", err)
+			}
+			lat, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid poly coordinate: %w", err)
+			}
+			ring = append(ring, orb.Point{lon, lat})
+		case line == "END":
+			inPolygon = false
+		default:
+			hole = line[0] == '!'
+			inRing = true
+		}
+	}
+	if inRing {
+		return nil, fmt.Errorf("poly file has an unclosed ring")
+	}
+	if inPolygon {
+		return nil, fmt.Errorf("poly file ends before end of polygon")
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("No geometry")
+	}
+	return result, nil
+}
+
+// UnmarshalPolygon parses a GeoJSON Polygon or MultiPolygon, or an Osmosis polygon filter file, into an orb.MultiPolygon region.
+func UnmarshalPolygon(data []byte) (orb.MultiPolygon, error) {
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
+		return UnmarshalRegion(data)
+	}
+	return UnmarshalPoly(data)
 }
