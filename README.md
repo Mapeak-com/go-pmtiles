@@ -18,8 +18,8 @@ See [Go package docs](https://pkg.go.dev/github.com/protomaps/go-pmtiles/pmtiles
 
 `<source>` is one of:
 
-* A local directory, or a bucket prefix with `--bucket`, holding `<name>.pmtiles` archives
-* A single local or remote `.pmtiles` archive, served as `<name>` (its file name without `.pmtiles`, or `--name`)
+* A local directory, or a bucket prefix with `--bucket`, holding `<source>.pmtiles` archives
+* A single local or remote `.pmtiles` archive, served as `<source>` (its file name without `.pmtiles`, or `--name`)
 
 Options:
 
@@ -31,9 +31,9 @@ Options:
 
 Endpoints:
 
-* `GET /<name>-<z>.pmtiles`: zoom levels 0 to `z`
-* `GET /<name>+<z>-<x>-<y>.pmtiles`: the area of tile `z/x/y`, from zoom `z` up
-* `GET /<name>` and `POST /<name>` (also `HEAD`), both with an optional `.pmtiles` suffix: the selection given by the query parameters below
+* `GET /<source>-<z>.pmtiles`: zoom levels 0 to `z`
+* `GET /<source>+<z>-<x>-<y>.pmtiles`: the area of tile `z/x/y`, from zoom `z` up
+* `GET /<source>` and `POST /<source>` (also `HEAD`), both with an optional `.pmtiles` suffix: the selection given by the query parameters below
 
 Polygon extracts select, at each zoom level, the tiles that overlap the polygon, excluding tiles that only touch it. This matches Planetiler `--polygon`.
 
@@ -43,11 +43,11 @@ A polygon is an Osmosis .poly file or a GeoJSON Polygon or MultiPolygon, and the
 
 Other query parameters, accepted by both `GET` and `POST`:
 
-* `output`: the returned file name (default `{name}.pmtiles`, or `{name}+{z}-{x}-{y}.pmtiles` with `slice`); fills any `{name}` placeholder with the archive name
+* `output`: the returned file name (default `{source}.pmtiles`, or `{source}+{z}-{x}-{y}.pmtiles` with `slice`)
 * `bbox=min_lon,min_lat,max_lon,max_lat` uses the tile selection of `pmtiles extract --bbox`
 * `slice=z/x/y` selects the area of tile `z/x/y`
   * Sets `minzoom` to `z` unless `minzoom` is given
-  * Sets `output` to `{name}+{z}-{x}-{y}.pmtiles` unless `output` is given
+  * Sets `output` to `{source}+{z}-{x}-{y}.pmtiles` unless `output` is given
   * Fills any `{z}`, `{x}`, and `{y}` placeholders in `output`
 * `minzoom`, `maxzoom` and `overfetch`
 
