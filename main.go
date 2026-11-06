@@ -655,7 +655,7 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, 
 
 	for attempt := 1; ; attempt++ {
 		err = pmtiles.Extract(
-			context.Background(),
+			r.Context(),
 			log.New(io.Discard, "", 0),
 			bucket,
 			sourceFile,
