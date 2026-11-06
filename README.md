@@ -39,7 +39,7 @@ Endpoints:
   * `slice=z/x/y`: the area of tile `z/x/y`, from `minzoom` (default `z`) up; fills `{z}`, `{x}`, `{y}` in `output`
   * `minzoom`, `maxzoom`, `overfetch`
   * `output`: the returned file name (default `<name>.pmtiles`, or `<name>+<z>-<x>-<y>.pmtiles` with `slice`)
-* `POST /<name>` takes the same parameters, with the polygon as the request body (up to 64 MiB)
+* `POST /<name>` takes the same query parameters, with the raw polygon file (GeoJSON or Osmosis .poly, up to 64 MiB) as the request body in place of `polygon`
 
 `slice`, `polygon` and `bbox` are mutually exclusive, and each can appear at most once.
 
