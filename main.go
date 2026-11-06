@@ -128,7 +128,7 @@ var cli struct {
 
 	ServeExtract struct {
 		Source          string  `arg:"" help:"Directory or bucket prefix containing source PMTiles archives, or a single local or remote .pmtiles archive"`
-		Name            string  `help:"Name to serve instead of the source file name; requires a single .pmtiles source"`
+		Name            string  `help:"Name to serve a single .pmtiles source under; defaults to its file name without .pmtiles; rejected for a directory or bucket prefix source"`
 		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
 		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
 		Interface       string  `default:"0.0.0.0"`
@@ -593,14 +593,14 @@ func parseExtractParams(w http.ResponseWriter, r *http.Request, archiveName stri
 			params.minZoom = int8(z)
 		}
 		if params.output == "" {
-			params.output = "{source}+{z}-{x}-{y}.pmtiles"
+			params.output = "{name}+{z}-{x}-{y}.pmtiles"
 		}
 		params.output = strings.NewReplacer("{z}", strconv.FormatInt(z, 10), "{x}", strconv.FormatInt(x, 10), "{y}", strconv.FormatInt(y, 10)).Replace(params.output)
 	}
 	if params.output == "" {
-		params.output = "{source}.pmtiles"
+		params.output = "{name}.pmtiles"
 	}
-	params.output = strings.ReplaceAll(params.output, "{source}", archiveName)
+	params.output = strings.ReplaceAll(params.output, "{name}", archiveName)
 	return params, nil
 }
 

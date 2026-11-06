@@ -244,9 +244,9 @@ func TestServeExtractBboxParam(t *testing.T) {
 func TestServeExtractSliceParam(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	for target, fileName := range map[string]string{
-		"/world?slice=1/1/0":                                     "world+1-1-0.pmtiles",
-		"/world?slice=1/1/0&output=w-{z}-{x}-{y}.pmtiles":        "w-1-1-0.pmtiles",
-		"/world?slice=1/1/0&output={source}-{z}-{x}-{y}.pmtiles": "world-1-1-0.pmtiles",
+		"/world?slice=1/1/0":                                   "world+1-1-0.pmtiles",
+		"/world?slice=1/1/0&output=w-{z}-{x}-{y}.pmtiles":      "w-1-1-0.pmtiles",
+		"/world?slice=1/1/0&output={name}-{z}-{x}-{y}.pmtiles": "world-1-1-0.pmtiles",
 	} {
 		tiles := assertExtract(t, serve(handler, http.MethodGet, target, nil), fileName)
 		assert.Equal(t, map[uint8]int{1: 1, 2: 4, 3: 16}, zoomCounts(tiles), target)
@@ -260,7 +260,7 @@ func TestServeExtractSliceParam(t *testing.T) {
 func TestServeExtractOutputParam(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	assertExtract(t, serve(handler, http.MethodGet, "/world?maxzoom=0&output=custom.pmtiles", nil), "custom.pmtiles")
-	assertExtract(t, serve(handler, http.MethodGet, "/world?maxzoom=0&output={source}-custom.pmtiles", nil), "world-custom.pmtiles")
+	assertExtract(t, serve(handler, http.MethodGet, "/world?maxzoom=0&output={name}-custom.pmtiles", nil), "world-custom.pmtiles")
 }
 
 const geojsonPolygon = `{"type":"Polygon","coordinates":[[[10,10],[20,10],[20,20],[10,20],[10,10]]]}`
