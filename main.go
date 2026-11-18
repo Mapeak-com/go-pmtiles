@@ -493,9 +493,21 @@ type deadlineWriter struct {
 	w http.ResponseWriter
 }
 
+const deadlineWriteBytes = 64 << 10
+
 func (d deadlineWriter) Write(b []byte) (int, error) {
-	http.NewResponseController(d.w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
-	return d.w.Write(b)
+	written := 0
+	for len(b) > 0 {
+		n := min(len(b), deadlineWriteBytes)
+		http.NewResponseController(d.w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
+		m, err := d.w.Write(b[:n])
+		written += m
+		if err != nil {
+			return written, err
+		}
+		b = b[n:]
+	}
+	return written, nil
 }
 
 // requestedRange returns the bytes a single-range Range header asks for and the status to serve them with;

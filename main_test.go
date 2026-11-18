@@ -298,6 +298,33 @@ func TestServeExtractRemoteHeadWithoutTiles(t *testing.T) {
 	assert.Equal(t, full.Header().Get("Content-Disposition"), head.Header().Get("Content-Disposition"))
 }
 
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	writes    []int
+	deadlines int
+}
+
+func (d *deadlineRecorder) Write(b []byte) (int, error) {
+	d.writes = append(d.writes, len(b))
+	return d.ResponseRecorder.Write(b)
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(time.Time) error {
+	d.deadlines++
+	return nil
+}
+
+func TestDeadlineWriterChunks(t *testing.T) {
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	data := bytes.Repeat([]byte{7}, 2*deadlineWriteBytes+5)
+	n, err := deadlineWriter{rec}.Write(data)
+	assert.Nil(t, err)
+	assert.Equal(t, len(data), n)
+	assert.Equal(t, []int{deadlineWriteBytes, deadlineWriteBytes, 5}, rec.writes)
+	assert.Equal(t, 3, rec.deadlines)
+	assert.Equal(t, data, rec.Body.Bytes())
+}
+
 func TestServeExtractWholeSource(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	for _, target := range []string{"/world", "/world.pmtiles"} {
