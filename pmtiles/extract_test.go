@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -276,4 +277,147 @@ func TestExtractSourceReplacedBeforeMetadataRead(t *testing.T) {
 		{1, 1, 1}: {2, 3},
 	}, false, Gzip)
 	extractReplaced(t, v1, v2, metadataSection)
+}
+
+func TestSplitOverfetchRange(t *testing.T) {
+	or := overfetchRange{Rng: srcDstRange{0, 0, 120}, CopyDiscards: []copyDiscard{{50, 10}, {60, 0}}}
+	assert.Equal(t, []overfetchRange{
+		{Rng: srcDstRange{0, 0, 40}, CopyDiscards: []copyDiscard{{40, 0}}},
+		{Rng: srcDstRange{40, 40, 40}, CopyDiscards: []copyDiscard{{10, 10}, {20, 0}}},
+		{Rng: srcDstRange{80, 70, 40}, CopyDiscards: []copyDiscard{{40, 0}}},
+	}, splitOverfetchRange(or, 40))
+}
+
+func TestSplitOverfetchRangeDiscardAtEdge(t *testing.T) {
+	or := overfetchRange{Rng: srcDstRange{0, 0, 100}, CopyDiscards: []copyDiscard{{30, 40}, {30, 0}}}
+	assert.Equal(t, []overfetchRange{
+		{Rng: srcDstRange{0, 0, 30}, CopyDiscards: []copyDiscard{{30, 0}}},
+		{Rng: srcDstRange{70, 30, 30}, CopyDiscards: []copyDiscard{{30, 0}}},
+	}, splitOverfetchRange(or, 50))
+}
+
+func TestSplitOverfetchRangeWhole(t *testing.T) {
+	or := overfetchRange{Rng: srcDstRange{5, 0, 120}, CopyDiscards: []copyDiscard{{50, 10}, {60, 0}}}
+	assert.Equal(t, []overfetchRange{or}, splitOverfetchRange(or, 1000))
+}
+
+func countingSource(t *testing.T, data []byte) (*httptest.Server, *int) {
+	header, err := DeserializeHeader(data[0:HeaderV3LenBytes])
+	assert.Nil(t, err)
+	var mu sync.Mutex
+	tileReads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start uint64
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+		mu.Lock()
+		if start >= header.TileDataOffset {
+			tileReads++
+		}
+		mu.Unlock()
+		http.ServeContent(w, r, "archive.pmtiles", time.Time{}, bytes.NewReader(data))
+	}))
+	t.Cleanup(server.Close)
+	return server, &tileReads
+}
+
+func streamArchive() []byte {
+	return fakeArchive(HeaderV3{TileType: Mvt, Clustered: true}, map[string]interface{}{"meta": "data"}, map[Zxy][]byte{
+		{0, 0, 0}: {0, 1, 2, 3},
+		{1, 0, 0}: {4, 5},
+		{1, 1, 1}: {6, 7, 8},
+	}, true, Gzip)
+}
+
+func TestExtractStream(t *testing.T) {
+	server, _ := countingSource(t, streamArchive())
+	output := filepath.Join(t.TempDir(), "output.pmtiles")
+	err := Extract(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, "", nil, "", "", output, 1, 0.05, false)
+	assert.Nil(t, err)
+	expected, err := os.ReadFile(output)
+	assert.Nil(t, err)
+	for _, threads := range []int{1, 4} {
+		var streamed bytes.Buffer
+		err = ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", threads, 0.05, func(length int64) (io.Writer, int64, int64, error) {
+			assert.Equal(t, int64(len(expected)), length)
+			return &streamed, 0, length - 1, nil
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, expected, streamed.Bytes())
+	}
+}
+
+func TestExtractStreamWindow(t *testing.T) {
+	server, _ := countingSource(t, streamArchive())
+	var full bytes.Buffer
+	err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(length int64) (io.Writer, int64, int64, error) {
+		return &full, 0, length - 1, nil
+	})
+	assert.Nil(t, err)
+	length := int64(full.Len())
+	for _, window := range [][2]int64{{0, 6}, {HeaderV3LenBytes, length - 1}, {length - 3, length - 1}, {length - 1, length - 1}} {
+		var part bytes.Buffer
+		err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(int64) (io.Writer, int64, int64, error) {
+			return &part, window[0], window[1], nil
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, full.Bytes()[window[0]:window[1]+1], part.Bytes(), window)
+	}
+}
+
+func TestExtractStreamWithoutWriter(t *testing.T) {
+	server, tileReads := countingSource(t, streamArchive())
+	called := false
+	err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(int64) (io.Writer, int64, int64, error) {
+		called = true
+		return nil, 0, 0, nil
+	})
+	assert.Nil(t, err)
+	assert.True(t, called)
+	assert.Equal(t, 0, *tileReads)
+}
+
+func TestExtractStreamHeaderOnlyWindow(t *testing.T) {
+	server, tileReads := countingSource(t, streamArchive())
+	var part bytes.Buffer
+	err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(int64) (io.Writer, int64, int64, error) {
+		return &part, 0, HeaderV3LenBytes - 1, nil
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, HeaderV3LenBytes, part.Len())
+	assert.Equal(t, 0, *tileReads)
+}
+
+func TestExtractStreamSourceReplacedBeforeMetadataRead(t *testing.T) {
+	header := HeaderV3{TileType: Mvt, Clustered: true}
+	v1 := fakeArchive(header, map[string]interface{}{"meta": "data"}, map[Zxy][]byte{{0, 0, 0}: {0, 1}}, false, Gzip)
+	v2 := fakeArchive(header, map[string]interface{}{"meta": "data2"}, map[Zxy][]byte{{0, 0, 0}: {0, 1}}, false, Gzip)
+	server, replaced := replacingSource(t, v1, v2, metadataSection)
+	called := false
+	err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(int64) (io.Writer, int64, int64, error) {
+		called = true
+		return io.Discard, 0, 0, nil
+	})
+	assert.True(t, *replaced)
+	assert.False(t, called)
+	assert.True(t, isRefreshRequiredError(err), "expected RefreshRequiredError, got %v", err)
+}
+
+func TestExtractStreamSmallPieces(t *testing.T) {
+	server, _ := countingSource(t, streamArchive())
+	var expected bytes.Buffer
+	err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", 1, 0.05, func(length int64) (io.Writer, int64, int64, error) {
+		return &expected, 0, length - 1, nil
+	})
+	assert.Nil(t, err)
+	saved := streamPieceBytes
+	streamPieceBytes = 1
+	t.Cleanup(func() { streamPieceBytes = saved })
+	for _, threads := range []int{1, 4} {
+		var streamed bytes.Buffer
+		err := ExtractStream(context.Background(), log.New(io.Discard, "", 0), server.URL, "archive.pmtiles", -1, -1, nil, "", "", threads, 0.05, func(length int64) (io.Writer, int64, int64, error) {
+			return &streamed, 0, length - 1, nil
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, expected.Bytes(), streamed.Bytes())
+	}
 }

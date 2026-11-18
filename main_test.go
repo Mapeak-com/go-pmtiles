@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +219,118 @@ func TestServeExtractHeadAndRange(t *testing.T) {
 	handler(rec, req)
 	assert.Equal(t, http.StatusPartialContent, rec.Code)
 	assert.Equal(t, full.Body.Bytes()[0:7], rec.Body.Bytes())
+}
+
+func TestServeExtractRanges(t *testing.T) {
+	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
+	full := serve(handler, http.MethodGet, "/world-1.pmtiles", nil).Body.Bytes()
+	length := len(full)
+	for spec, expected := range map[string][]byte{
+		"bytes=-7":                              full[length-7:],
+		"bytes=" + strconv.Itoa(length-3) + "-": full[length-3:],
+		"bytes=5-" + strconv.Itoa(length+100):   full[5:],
+		"bytes=" + strconv.Itoa(length-1) + "-" + strconv.Itoa(length-1): full[length-1:],
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/world-1.pmtiles", nil)
+		req.Header.Set("Range", spec)
+		handler(rec, req)
+		assert.Equal(t, http.StatusPartialContent, rec.Code, spec)
+		assert.Equal(t, expected, rec.Body.Bytes(), spec)
+		assert.Equal(t, strconv.Itoa(len(expected)), rec.Header().Get("Content-Length"), spec)
+	}
+}
+
+func TestServeExtractRangeIgnored(t *testing.T) {
+	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
+	full := serve(handler, http.MethodGet, "/world-1.pmtiles", nil).Body.Bytes()
+	for _, headers := range []map[string]string{
+		{"Range": "bytes=0-1,4-5"},
+		{"Range": "bytes=x-"},
+		{"Range": "items=0-1"},
+		{"Range": "bytes=0-6", "If-Range": `"etag"`},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/world-1.pmtiles", nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		handler(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, headers)
+		assert.Equal(t, full, rec.Body.Bytes(), headers)
+	}
+}
+
+func TestServeExtractRangeNotSatisfiable(t *testing.T) {
+	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
+	length := serve(handler, http.MethodGet, "/world-1.pmtiles", nil).Body.Len()
+	for _, spec := range []string{"bytes=" + strconv.Itoa(length) + "-", "bytes=-0"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/world-1.pmtiles", nil)
+		req.Header.Set("Range", spec)
+		handler(rec, req)
+		assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code, spec)
+		assert.Equal(t, "bytes */"+strconv.Itoa(length), rec.Header().Get("Content-Range"), spec)
+	}
+}
+
+func TestServeExtractRemoteHeadWithoutTiles(t *testing.T) {
+	archive := worldArchive()
+	header, err := pmtiles.DeserializeHeader(archive[0:pmtiles.HeaderV3LenBytes])
+	assert.Nil(t, err)
+	tileReads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start uint64
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+		if start >= header.TileDataOffset {
+			tileReads++
+		}
+		http.ServeContent(w, r, "world.pmtiles", time.Time{}, bytes.NewReader(archive))
+	}))
+	t.Cleanup(server.Close)
+	handler := ExtractServeHandler("", server.URL+"/world.pmtiles", "world", -1, -1, 1, 0.05)
+	head := serve(handler, http.MethodHead, "/world-2.pmtiles", nil)
+	assert.Equal(t, http.StatusOK, head.Code)
+	assert.Equal(t, 0, tileReads)
+	full := serve(handler, http.MethodGet, "/world-2.pmtiles", nil)
+	assert.Greater(t, tileReads, 0)
+	assert.Equal(t, strconv.Itoa(full.Body.Len()), head.Header().Get("Content-Length"))
+	assert.Equal(t, full.Header().Get("Content-Disposition"), head.Header().Get("Content-Disposition"))
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	writes    []int
+	deadlines int
+}
+
+func (d *deadlineRecorder) Write(b []byte) (int, error) {
+	d.writes = append(d.writes, len(b))
+	return d.ResponseRecorder.Write(b)
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(time.Time) error {
+	d.deadlines++
+	return nil
+}
+
+func TestDeadlineWriterChunks(t *testing.T) {
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	data := bytes.Repeat([]byte{7}, 2*deadlineWriteBytes+5)
+	n, err := deadlineWriter{rec}.Write(data)
+	assert.Nil(t, err)
+	assert.Equal(t, len(data), n)
+	assert.Equal(t, []int{deadlineWriteBytes, deadlineWriteBytes, 5}, rec.writes)
+	assert.Equal(t, 3, rec.deadlines)
+	assert.Equal(t, data, rec.Body.Bytes())
+}
+
+func TestServeExtractLocalWriteDeadline(t *testing.T) {
+	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	handler(rec, httptest.NewRequest(http.MethodGet, "/world-1.pmtiles", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1+len(rec.writes), rec.deadlines)
 }
 
 func TestServeExtractWholeSource(t *testing.T) {
