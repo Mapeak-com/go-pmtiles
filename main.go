@@ -375,8 +375,9 @@ func startHTTPServer(addr string, handler http.Handler) error {
 func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit int8, downloadThreads int, overfetch float32) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		if bucket != "" || strings.HasPrefix(source, "http") {
-			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second))
+		remote := bucket != "" || strings.HasPrefix(source, "http")
+		if remote {
+			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
 		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		w = rec
@@ -482,8 +483,55 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 			sourceFile = source
 		}
 
-		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, polygon, bbox, tileStr, downloadThreads, requestOverfetch)
+		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, polygon, bbox, tileStr, downloadThreads, requestOverfetch, remote)
 	}
+}
+
+const remoteWriteTimeout = 120 * time.Second
+
+type deadlineWriter struct {
+	w http.ResponseWriter
+}
+
+func (d deadlineWriter) Write(b []byte) (int, error) {
+	http.NewResponseController(d.w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
+	return d.w.Write(b)
+}
+
+// requestedRange returns the bytes a single-range Range header asks for and the status to serve them with;
+// other Range headers, and any with If-Range, get the whole archive.
+func requestedRange(r *http.Request, length int64) (int64, int64, int) {
+	spec, ok := strings.CutPrefix(r.Header.Get("Range"), "bytes=")
+	startText, endText, isRange := strings.Cut(spec, "-")
+	if !ok || !isRange || strings.Contains(spec, ",") || r.Header.Get("If-Range") != "" {
+		return 0, length - 1, http.StatusOK
+	}
+	if startText == "" {
+		suffix, err := strconv.ParseInt(endText, 10, 64)
+		if err != nil || suffix < 0 {
+			return 0, length - 1, http.StatusOK
+		}
+		if suffix == 0 {
+			return 0, 0, http.StatusRequestedRangeNotSatisfiable
+		}
+		return max(length-suffix, 0), length - 1, http.StatusPartialContent
+	}
+	first, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || first < 0 {
+		return 0, length - 1, http.StatusOK
+	}
+	if first >= length {
+		return 0, 0, http.StatusRequestedRangeNotSatisfiable
+	}
+	last := length - 1
+	if endText != "" {
+		end, err := strconv.ParseInt(endText, 10, 64)
+		if err != nil || end < first {
+			return 0, length - 1, http.StatusOK
+		}
+		last = min(end, last)
+	}
+	return first, last, http.StatusPartialContent
 }
 
 const maxPolygonBytes = 64 << 20
@@ -623,47 +671,66 @@ func readHeader(bucketURL, sourceFile string) error {
 	return err
 }
 
-func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, polygon []byte, bbox, tileStr string, downloadThreads int, overfetch float32) {
+func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, polygon []byte, bbox, tileStr string, downloadThreads int, overfetch float32, remote bool) {
 	if err := readHeader(bucket, sourceFile); err != nil {
 		log.Printf("Error serving extract for %s: %v", fileName, err)
 		http.Error(w, "Archive not found", http.StatusNotFound)
 		return
 	}
 
-	tmpFile, err := os.CreateTemp("", "pmtiles-extract-*.tmp")
-	if err != nil {
-		log.Printf("Error serving extract for %s: failed to create temporary file: %v", fileName, err)
-		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
-		return
+	started := false
+	begin := func(length int64) (io.Writer, int64, int64, error) {
+		started = true
+		first, last, status := requestedRange(r, length)
+		if status == http.StatusRequestedRangeNotSatisfiable {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", length))
+			http.Error(w, "Requested range not satisfiable", status)
+			return nil, 0, 0, nil
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
+		w.Header().Set("Content-Length", strconv.FormatInt(last-first+1, 10))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		if status == http.StatusPartialContent {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", first, last, length))
+		}
+		w.WriteHeader(status)
+		if r.Method == http.MethodHead {
+			return nil, 0, 0, nil
+		}
+		if remote {
+			return deadlineWriter{w}, first, last, nil
+		}
+		return w, first, last, nil
 	}
-	tempName := tmpFile.Name()
 
-	tmpFile.Close()
-	defer os.Remove(tempName)
-
+	var err error
 	for attempt := 1; ; attempt++ {
-		err = pmtiles.Extract(
+		err = pmtiles.ExtractStream(
 			r.Context(),
 			log.New(io.Discard, "", 0),
 			bucket,
 			sourceFile,
 			minZoom,
 			maxZoom,
-			"",
 			polygon,
 			bbox,
 			tileStr,
-			tempName,
 			downloadThreads,
 			overfetch,
-			false,
+			begin,
 		)
-		if attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
+		if started || attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
 			break
 		}
 		log.Printf("Source %s changed during extraction, retrying", sourceFile)
 	}
 	if err != nil {
+		if started {
+			log.Printf("Error serving extract for %s: streaming failed: %v", fileName, err)
+			return
+		}
 		// Defends against TOCTOU race condition if source file is deleted/moved prior to extraction
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "Source archive not found", http.StatusNotFound)
@@ -674,16 +741,6 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, 
 		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
 		return
 	}
-
-	f, err := os.Open(tempName)
-	if err != nil {
-		log.Printf("Error serving extract for %s: %v", fileName, err)
-		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
-		return
-	}
-	defer f.Close()
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
-	http.ServeContent(w, r, fileName, time.Now(), f)
 }
 
 type statusRecorder struct {
@@ -696,6 +753,10 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += int64(n)
 	return n, err
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 func (r *statusRecorder) WriteHeader(status int) {

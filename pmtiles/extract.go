@@ -261,6 +261,178 @@ func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
 // 10. write the leaf directories (if any)
 // 11. Get all tiles, and write directly to the output.
 func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, polygon []byte, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
+	return extract(ctx, logger, bucketURL, key, minzoom, maxzoom, regionFile, polygon, bbox, tileStr, output, downloadThreads, overfetch, dryRun, nil)
+}
+
+// StreamBegin is called by ExtractStream with the length of the archive once the extract is planned, before any tile is fetched.
+// It returns the writer that receives the bytes from first to last, inclusive, of the archive, in order;
+// a nil writer ends the extract without fetching tiles.
+type StreamBegin func(length int64) (w io.Writer, first int64, last int64, err error)
+
+var streamPieceBytes uint64 = 8 << 20
+
+// ExtractStream writes an extract to the writer returned by begin as the tiles are fetched, rather than to a file.
+func ExtractStream(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, polygon []byte, bbox string, tileStr string, downloadThreads int, overfetch float32, begin StreamBegin) error {
+	return extract(ctx, logger, bucketURL, key, minzoom, maxzoom, "", polygon, bbox, tileStr, "", downloadThreads, overfetch, false, begin)
+}
+
+// splitOverfetchRange splits a range into pieces of at most size bytes, dropping the discarded bytes at the edges of the pieces.
+func splitOverfetchRange(or overfetchRange, size uint64) []overfetchRange {
+	pieces := make([]overfetchRange, 0)
+	src := or.Rng.SrcOffset
+	dst := or.Rng.DstOffset
+	current := overfetchRange{Rng: srcDstRange{src, dst, 0}}
+	flush := func() {
+		if len(current.CopyDiscards) > 0 {
+			pieces = append(pieces, current)
+		}
+		current = overfetchRange{Rng: srcDstRange{src, dst, 0}}
+	}
+	for _, cd := range or.CopyDiscards {
+		for wanted := cd.Wanted; wanted > 0; {
+			n := min(wanted, size-current.Rng.Length)
+			current.CopyDiscards = append(current.CopyDiscards, copyDiscard{n, 0})
+			current.Rng.Length += n
+			src += n
+			dst += n
+			wanted -= n
+			if current.Rng.Length == size {
+				flush()
+			}
+		}
+		if cd.Discard > 0 {
+			src += cd.Discard
+			if len(current.CopyDiscards) > 0 && current.Rng.Length+cd.Discard < size {
+				current.CopyDiscards[len(current.CopyDiscards)-1].Discard = cd.Discard
+				current.Rng.Length += cd.Discard
+			} else {
+				flush()
+			}
+		}
+	}
+	flush()
+	return pieces
+}
+
+func wantedBytes(or overfetchRange) uint64 {
+	total := uint64(0)
+	for _, cd := range or.CopyDiscards {
+		total += cd.Wanted
+	}
+	return total
+}
+
+func fetchPiece(ctx context.Context, bucket Bucket, key string, etag string, tileDataOffset uint64, piece overfetchRange) ([]byte, error) {
+	reader, _, _, err := bucket.NewRangeReaderEtag(ctx, key, int64(tileDataOffset+piece.Rng.SrcOffset), int64(piece.Rng.Length), etag)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	var data bytes.Buffer
+	for _, cd := range piece.CopyDiscards {
+		if _, err := io.CopyN(&data, reader, int64(cd.Wanted)); err != nil {
+			return nil, err
+		}
+		if _, err := io.CopyN(io.Discard, reader, int64(cd.Discard)); err != nil {
+			return nil, err
+		}
+	}
+	return data.Bytes(), nil
+}
+
+type windowWriter struct {
+	w     io.Writer
+	first int64
+	last  int64
+}
+
+func (o windowWriter) put(pos int64, b []byte) error {
+	start := max(o.first-pos, 0)
+	end := min(o.last+1-pos, int64(len(b)))
+	if start >= end {
+		return nil
+	}
+	_, err := o.w.Write(b[start:end])
+	return err
+}
+
+func writeStream(ctx context.Context, bucket Bucket, key string, etag string, header HeaderV3, headerBytes []byte, rootBytes []byte, leavesBytes []byte, sourceMetadataOffset uint64, sourceTileDataOffset uint64, ranges *list.List, downloadThreads int, begin StreamBegin) error {
+	metadataReader, _, _, err := bucket.NewRangeReaderEtag(ctx, key, int64(sourceMetadataOffset), int64(header.MetadataLength), etag)
+	if err != nil {
+		return err
+	}
+	metadataBytes, err := io.ReadAll(metadataReader)
+	metadataReader.Close()
+	if err != nil {
+		return err
+	}
+	w, first, last, err := begin(int64(header.TileDataOffset + header.TileDataLength))
+	if err != nil || w == nil {
+		return err
+	}
+	out := windowWriter{w, first, last}
+	pos := int64(0)
+	for _, part := range [][]byte{headerBytes, rootBytes, metadataBytes, leavesBytes} {
+		if err := out.put(pos, part); err != nil {
+			return err
+		}
+		pos += int64(len(part))
+	}
+	sorted := make([]overfetchRange, 0, ranges.Len())
+	for e := ranges.Front(); e != nil; e = e.Next() {
+		sorted = append(sorted, e.Value.(overfetchRange))
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Rng.DstOffset < sorted[j].Rng.DstOffset
+	})
+	pieces := make([]overfetchRange, 0)
+	for _, or := range sorted {
+		for _, piece := range splitOverfetchRange(or, streamPieceBytes) {
+			start := int64(header.TileDataOffset + piece.Rng.DstOffset)
+			if start <= last && start+int64(wantedBytes(piece)) > first {
+				pieces = append(pieces, piece)
+			}
+		}
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	queue := make(chan chan []byte, max(downloadThreads-1, 0))
+	g.Go(func() error {
+		defer close(queue)
+		for _, piece := range pieces {
+			result := make(chan []byte, 1)
+			select {
+			case queue <- result:
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+			g.Go(func() error {
+				data, err := fetchPiece(gctx, bucket, key, etag, sourceTileDataOffset, piece)
+				if err != nil {
+					return err
+				}
+				result <- data
+				return nil
+			})
+		}
+		return nil
+	})
+	g.Go(func() error {
+		for _, piece := range pieces {
+			select {
+			case data := <-<-queue:
+				if err := out.put(int64(header.TileDataOffset+piece.Rng.DstOffset), data); err != nil {
+					return err
+				}
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+		}
+		return nil
+	})
+	return g.Wait()
+}
+
+func extract(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, polygon []byte, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool, begin StreamBegin) error {
 	// 1. fetch the header
 	start := time.Now()
 
@@ -530,6 +702,10 @@ func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key stri
 	totalActualBytes := uint64(0)
 	for _, x := range tileParts {
 		totalActualBytes += x.Length
+	}
+
+	if begin != nil {
+		return writeStream(ctx, bucket, key, etag, header, headerBytes, newRootBytes, newLeavesBytes, sourceMetadataOffset, sourceTileDataOffset, overfetchRanges, downloadThreads, begin)
 	}
 
 	if !dryRun {
