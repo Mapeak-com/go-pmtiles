@@ -375,10 +375,7 @@ func startHTTPServer(addr string, handler http.Handler) error {
 func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit int8, downloadThreads int, overfetch float32) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		remote := bucket != "" || strings.HasPrefix(source, "http")
-		if remote {
-			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
-		}
+		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeTimeout))
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		w = rec
 		defer func() {
@@ -483,11 +480,11 @@ func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit
 			sourceFile = source
 		}
 
-		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, polygon, bbox, tileStr, downloadThreads, requestOverfetch, remote)
+		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, polygon, bbox, tileStr, downloadThreads, requestOverfetch)
 	}
 }
 
-const remoteWriteTimeout = 120 * time.Second
+const writeTimeout = 120 * time.Second
 
 type deadlineWriter struct {
 	w http.ResponseWriter
@@ -499,7 +496,7 @@ func (d deadlineWriter) Write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
 		n := min(len(b), deadlineWriteBytes)
-		http.NewResponseController(d.w).SetWriteDeadline(time.Now().Add(remoteWriteTimeout))
+		http.NewResponseController(d.w).SetWriteDeadline(time.Now().Add(writeTimeout))
 		m, err := d.w.Write(b[:n])
 		written += m
 		if err != nil {
@@ -683,7 +680,7 @@ func readHeader(bucketURL, sourceFile string) error {
 	return err
 }
 
-func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, polygon []byte, bbox, tileStr string, downloadThreads int, overfetch float32, remote bool) {
+func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, polygon []byte, bbox, tileStr string, downloadThreads int, overfetch float32) {
 	if err := readHeader(bucket, sourceFile); err != nil {
 		log.Printf("Error serving extract for %s: %v", fileName, err)
 		http.Error(w, "Archive not found", http.StatusNotFound)
@@ -711,10 +708,7 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, 
 		if r.Method == http.MethodHead {
 			return nil, 0, 0, nil
 		}
-		if remote {
-			return deadlineWriter{w}, first, last, nil
-		}
-		return w, first, last, nil
+		return deadlineWriter{w}, first, last, nil
 	}
 
 	var err error

@@ -325,6 +325,14 @@ func TestDeadlineWriterChunks(t *testing.T) {
 	assert.Equal(t, data, rec.Body.Bytes())
 }
 
+func TestServeExtractLocalWriteDeadline(t *testing.T) {
+	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	handler(rec, httptest.NewRequest(http.MethodGet, "/world-1.pmtiles", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 1+len(rec.writes), rec.deadlines)
+}
+
 func TestServeExtractWholeSource(t *testing.T) {
 	handler := ExtractServeHandler("", worldDir(t), "", -1, -1, 1, 0.05)
 	for _, target := range []string{"/world", "/world.pmtiles"} {
